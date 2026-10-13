@@ -7,7 +7,7 @@ from functools import lru_cache
 from fastapi import APIRouter, BackgroundTasks, Request, HTTPException, Response
 from app.core.config import settings
 from app.db.supabase_client import get_supabase
-from app.agents.registry import build_concierge
+from app.agents.registry import build_bot
 from app.services.whatsapp_service import WhatsAppService
 
 logger = logging.getLogger(__name__)
@@ -30,8 +30,8 @@ def is_duplicate(message_id: str) -> bool:
 
 
 @lru_cache
-def get_concierge():
-    return build_concierge(get_supabase())
+def get_bot():
+    return build_bot(get_supabase())
 
 
 @router.get("/whatsapp")
@@ -58,7 +58,7 @@ async def process_message(msg: dict) -> None:
     async with lock:
         try:
             await WhatsAppService.mark_read(msg["message_id"])  # blue ticks + typing bubble
-            replies = await get_concierge().handle(
+            replies = await get_bot().handle(
                 msg["whatsapp_number"], msg["name"], msg["message_id"], msg["text"], msg["reply_id"], msg["media"], msg["location"]
             )
             for reply in replies:
@@ -66,7 +66,7 @@ async def process_message(msg: dict) -> None:
         except Exception:
             logger.exception("Flow failed for %s", msg["whatsapp_number"])
             await WhatsAppService.send_message(
-                msg["whatsapp_number"], "Oops, something went wrong. 🙏 Please try again in a bit, or type *menu* to start over."
+                msg["whatsapp_number"], "Oops, something went wrong. 🙏 Please try again in a bit, or tell me what you need."
             )
 
 

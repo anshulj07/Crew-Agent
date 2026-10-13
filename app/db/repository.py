@@ -1,5 +1,7 @@
-"""Data access shared by every agent: users, conversation state, chat history, interests.
-Synchronous; callers run it in a thread."""
+"""Data access: users, conversation state, chat history and paid orders. Synchronous; callers run it in a thread."""
+import random
+import string
+from datetime import datetime, timezone
 
 
 class CoreRepo:
@@ -35,15 +37,34 @@ class CoreRepo:
             {"user_id": user_id, "role": role, "agent": agent, "content": content[:2000]}
         ).execute()
 
-    def recent_messages(self, user_id: str, limit: int = 8) -> list[dict]:
-        rows = (self.db.table("messages").select("role, agent, content").eq("user_id", user_id)
-                .order("created_at", desc=True).limit(limit).execute().data)
+    def recent_messages(self, user_id: str, limit: int = 8, since: str | None = None) -> list[dict]:
+        """The last `limit` messages, oldest first; `since` (ISO time) leaves out everything before a "new trip"."""
+        query = self.db.table("messages").select("role, agent, content").eq("user_id", user_id)
+        if since:
+            query = query.gt("created_at", since)
+        rows = query.order("created_at", desc=True).limit(limit).execute().data
         return rows[::-1]  # oldest first
 
-    # ---- long-term memory
-    def add_interest(self, user_id: str, interest: str) -> None:
-        """Remember which not-yet-live services this user wants (users.preferences.interests)."""
-        row = self.db.table("users").select("preferences").eq("id", user_id).limit(1).execute().data
-        prefs = (row[0]["preferences"] if row else None) or {}
-        prefs["interests"] = sorted(set(prefs.get("interests", [])) | {interest})
-        self.db.table("users").update({"preferences": prefs}).eq("id", user_id).execute()
+    # ---- places the reel planner recognises
+    def list_airports(self) -> list[dict]:
+        return self.db.table("airports").select("*").execute().data
+
+    # ---- orders: the user's trip, paid with one link
+    def create_order(self, user_id: str, phone: str, items: list[dict], amount: float, currency: str) -> dict:
+        ref = "CR" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+        return self.db.table("orders").insert({
+            "ref": ref, "user_id": user_id, "phone": phone, "items": items, "amount": amount, "currency": currency,
+        }).execute().data[0]
+
+    def set_order_link(self, order_id: str, link_id: str, short_url: str) -> None:
+        self.db.table("orders").update({"link_id": link_id, "short_url": short_url}).eq("id", order_id).execute()
+
+    def cancel_order(self, order_id: str) -> None:
+        """The trip changed and got a new link; this one is replaced (still marked paid if its link gets paid anyway)."""
+        self.db.table("orders").update({"status": "cancelled"}).eq("id", order_id).eq("status", "created").execute()
+
+    def mark_order_paid(self, link_id: str) -> dict | None:
+        """The order this link paid, or None if it is unknown or was already marked paid (Razorpay retries webhooks)."""
+        rows = (self.db.table("orders").update({"status": "paid", "paid_at": datetime.now(timezone.utc).isoformat()})
+                .eq("link_id", link_id).in_("status", ["created", "cancelled"]).execute().data)
+        return rows[0] if rows else None
